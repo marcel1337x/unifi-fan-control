@@ -1,7 +1,7 @@
 [Unit]
 Description=UniFi Adaptive Fan Controller
 After=basic.target
-Documentation=https://github.com/iceteaSA/unifi-fan-control
+Documentation=https://github.com/marcel1337x/unifi-fan-control
 
 [Service]
 Type=simple
@@ -12,7 +12,13 @@ NoNewPrivileges=true
 PrivateTmp=true
 ProtectHome=true
 Restart=always
+# The daemon's TERM trap exits 143 (128+SIGTERM) after zeroing the fans; that is a
+# clean stop, not a failure.
+SuccessExitStatus=143
 RestartSec=5
+# The daemon logs "<severity>PREFIX: message" lines to stdout.
+SyslogIdentifier=fan-control
+SyslogLevelPrefix=true
 # 24h window for log rate limiting
 LogRateLimitIntervalSec=86400
 # Allow 10k logs/day

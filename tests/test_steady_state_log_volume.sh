@@ -36,12 +36,13 @@ cleanup_sandbox
 setup_sandbox
 
 echo "66" >"$SANDBOX/cputemp"
+set_config LOG_LEVEL=debug
 start_daemon
 wait_for_file_gt "$SANDBOX/hwmon/hwmon0/pwm1" 0
 
 # A 1°C flutter is routine hardware noise; a sustained 2°C step is not.
 /bin/sleep 1
-before_tag_lines=$(grep -E -c ' (TEMP|CALC|DEADBAND):' "$SANDBOX/syslog" || true)
+before_tag_lines=$(grep -E -c '(TEMP|CALC|DEADBAND):' "$SANDBOX/syslog" || true)
 
 for ((iteration = 0; iteration < 30; iteration++)); do
     if ((iteration % 2 == 0)); then
@@ -52,7 +53,7 @@ for ((iteration = 0; iteration < 30; iteration++)); do
     /bin/sleep 0.08
 done
 
-after_tag_lines=$(grep -E -c ' (TEMP|CALC|DEADBAND):' "$SANDBOX/syslog" || true)
+after_tag_lines=$(grep -E -c '(TEMP|CALC|DEADBAND):' "$SANDBOX/syslog" || true)
 flutter_lines=$((after_tag_lines - before_tag_lines))
 
 if ((flutter_lines > 6)); then

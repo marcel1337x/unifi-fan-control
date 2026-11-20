@@ -156,10 +156,17 @@ teardown_sandbox() {
 # ── Daemon lifecycle ─────────────────────────────────────────────────────────
 start_daemon() {
     # shellcheck disable=SC2086
-    bash "$FAN_CONTROL_SCRIPT" &
+    # The daemon logs to stdout; under systemd that stream is the journal.
+    bash "$FAN_CONTROL_SCRIPT" >>"$SANDBOX/syslog" &
     DAEMON_PID=$!
     # Give the daemon a moment to bootstrap and enter the main loop
     /bin/sleep 0.5
+}
+
+# Pre-seed config keys before start_daemon; check_param appends the rest.
+# Use LOG_LEVEL=debug for tests that assert on TEMP:, CALC: or DEADBAND: lines.
+set_config() {
+    printf '%s\n' "$@" >>"$SANDBOX/config"
 }
 
 stop_daemon() {

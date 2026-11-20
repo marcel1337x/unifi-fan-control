@@ -37,7 +37,7 @@ consoles and gateways running full UniFi OS.
 
 ## Installation
 ```bash
-curl -fsSL https://raw.githubusercontent.com/iceteaSA/unifi-fan-control/main/install.sh | sudo bash
+curl -fsSL https://raw.githubusercontent.com/marcel1337x/unifi-fan-control/main/install.sh | sudo bash
 ```
 
 By default, the installer resolves the latest tagged release, downloads its
@@ -49,7 +49,7 @@ The installed version is recorded in `/data/fan-control/VERSION`.
 Use a version when you need a known build:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/iceteaSA/unifi-fan-control/main/install.sh | sudo FAN_CONTROL_VERSION=v1.2.0 bash
+curl -fsSL https://raw.githubusercontent.com/marcel1337x/unifi-fan-control/main/install.sh | sudo FAN_CONTROL_VERSION=v1.2.0 bash
 ```
 
 `FAN_CONTROL_VERSION` accepts `v1.2.0` or `1.2.0`. Pinned installs verify the
@@ -68,7 +68,7 @@ resolver cannot be fixed immediately, a one-time fallback is available for one
 specific tag:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/iceteaSA/unifi-fan-control/v1.2.0/install.sh | sudo FAN_CONTROL_ALLOW_UNVERIFIED=v1.2.0 bash
+curl -fsSL https://raw.githubusercontent.com/marcel1337x/unifi-fan-control/v1.2.0/install.sh | sudo FAN_CONTROL_ALLOW_UNVERIFIED=v1.2.0 bash
 ```
 
 This bypasses SHA256 verification for that install. It still validates the
@@ -79,7 +79,7 @@ downloaded files before writing them, but it is not the normal or preferred path
 For development builds:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/iceteaSA/unifi-fan-control/main/install.sh | sudo FAN_CONTROL_BRANCH=feature/example bash
+curl -fsSL https://raw.githubusercontent.com/marcel1337x/unifi-fan-control/main/install.sh | sudo FAN_CONTROL_BRANCH=feature/example bash
 ```
 
 Branch installs download individual files from GitHub and are unverified. Do
@@ -90,7 +90,7 @@ not use them for production routers. `FAN_CONTROL_VERSION` and
 If you prefer to inspect the code before installation:
 ```bash
 # Clone the repository
-git clone https://github.com/iceteaSA/unifi-fan-control.git
+git clone https://github.com/marcel1337x/unifi-fan-control.git
 cd unifi-fan-control
 
 # Run the installer from a checkout or extracted release tarball
@@ -99,6 +99,25 @@ sudo ./install.sh
 
 When all four runtime files are beside `install.sh`, the installer uses those
 local files without a network request.
+
+Run from a git checkout **under `/data`** (e.g. `/data/work/unifi-fan-control`),
+`install.sh` installs **in place**: the checkout becomes the install directory, the
+systemd unit is pointed at it, and the daemon keeps its `config`, `temp_state` and
+`optimal_pwm` beside itself (git-ignored). A checkout anywhere else, such as
+`/root` (hidden from the service by `ProtectHome=true`), and any non-checkout
+install go to `/data/fan-control`.
+`FAN_CONTROL_INSTALL_DIR` overrides both. Install paths containing spaces, `%`,
+`\` or quotes are rejected because systemd can't use them. The daemon logs
+`CONFIG: Install dir=… | Config=…` at startup.
+`uninstall.sh` finds the install directory from the unit. It keeps a checkout and
+removes only its runtime files, and it refuses to delete `/`, `/data` or any
+directory without `fan-control.sh`. This is handy for testing a branch:
+```bash
+git clone https://github.com/marcel1337x/unifi-fan-control.git /data/work/unifi-fan-control
+cd /data/work/unifi-fan-control
+git checkout <branch>
+sudo ./install.sh                 # re-run after each git pull
+```
 
 ## Configuration
 Edit `/data/fan-control/config`:
@@ -123,10 +142,11 @@ DRIVE_CHECK_INTERVAL=60  # Drive temperature polling interval (seconds)
 
 # Advanced Tuning
 ALPHA=20          # Smoothing factor, lower values make the smoothed temp follow raw temp more closely (0-100 raw→smooth)
-DEADBAND=1        # Temperature stability threshold (°C)
+DEADBAND=1        # Temperature stability threshold (°C); see note below
 LEARNING_RATE=5   # Hourly PWM optimization step size
 TAPER_MINS=90     # Cool-down duration (minutes)
 CHECK_INTERVAL=15 # Temperature check frequency (seconds)
+LOG_LEVEL=info    # Log verbosity: error, warn, info or debug (see Monitoring & Logging)
 
 # Auto-detects all active fan channels by default (recommended)
 # Set to false to use FAN_PWM_DEVICE as a single manual override instead
@@ -135,6 +155,8 @@ FAN_PWM_AUTODETECT=true
 FAN_PWM_DEVICE="/sys/class/hwmon/hwmon0/pwm1"
 OPTIMAL_PWM_FILE="/data/fan-control/optimal_pwm"
 ```
+
+> **Deadband reference (changed in 1.3)**: In ACTIVE, the speed is recalculated when the smoothed temperature has moved more than `DEADBAND` since the reference temperature. Previously the reference only moved when the PWM actually changed. With the speed pinned (for example at `MIN_PWM` between `MIN_TEMP` and the activation temperature), the same delta then re-triggered every cycle. The reference now also moves when the recalculated speed equals the current one. Learning compares against the same reference, so its "temperature rising" check now measures from the last recalculation rather than from the last speed change.
 
 > **Note**: The script automatically checks for missing configuration parameters and adds them with default values if they're not present in the config file. This ensures that all required parameters are always available, even if you've edited the config file manually.
 
@@ -160,12 +182,27 @@ systemctl restart fan-control.service
 - **EMERGENCY → ACTIVE**: Temperature drops significantly below critical level (80°C, with 5°C hysteresis)
 
 ## Monitoring & Logging
+`LOG_LEVEL` decides which messages are written. Each level includes the ones above it:
+
+| `LOG_LEVEL` | Adds | Journal priority |
+|-------------|------|------------------|
+| `error` | `FATAL`, `ERROR` (always written) | `err` |
+| `warn` | `ALERT`, `WARNING`, plus problems that keep their subsystem tag: `CONFIG: Invalid …`, `DETECT: … unavailable, excluding`, `DRIVE: … read failed` / `unreadable` | `warning` |
+| `info` (default) | state changes, speed changes, startup, detection, drives, learning, `STATUS` heartbeat | `info` |
+| `debug` | per-cycle `TEMP`, `CALC`, `DEADBAND` diagnostics | `info`¹ |
+
+¹ UniFi OS configures journald with `MaxLevelStore=info`, which silently drops journal priority `debug`. Debug lines are therefore stored at `info`; `LOG_LEVEL` alone decides whether they are written.
+
+`MIGRATE: Failed …` and `ALERT: Another instance …` (the daemon exits) are logged at `error`. While the sensor stays unreadable, `ERROR: Failed to read temperature` is logged for attempts 1–3 and then every 100th attempt, because error lines can't be filtered.
+
+Messages below the configured level are never sent, so they don't count towards the service's daily journal limit. Use `debug` while tuning, then go back to `info`.
+
 Key operational signals:
 ```log
-# Temperature Monitoring
+# Temperature Monitoring (debug)
 TEMP: RAW=68℃ | SMOOTH=65℃ | DELTA=-3℃
 
-# Speed Calculations
+# Speed Calculations (debug)
 CALC: temp_diff=5℃ | range=20℃ | speed=100pwm
 
 # State Transitions
@@ -213,6 +250,7 @@ View logs with:
 ```bash
 journalctl -u fan-control.service -f          # Live monitoring
 journalctl -u fan-control.service --since "10 minutes ago"  # Recent history
+journalctl -u fan-control.service -p warning  # Warnings and errors only
 ```
 
 ## Technical Implementation
@@ -276,6 +314,16 @@ systemctl restart fan-control.service  # Apply config changes
 /data/fan-control/uninstall.sh
 ```
 
+### What happens to the fan when the service stops?
+
+The fan is never left stopped with nothing controlling it. On every exit (`systemctl stop`, restart, uninstall, crash with a clean signal) each fan channel the daemon controls is handed over:
+
+- **lm63 (UCG-Max):** the chip's own 8-point fan curve is programmed from your config (`MIN_TEMP`→`MAX_TEMP`, `MIN_PWM`→`MAX_PWM`; default 60→85 °C, 91→255) and the chip is switched to automatic mode, logged as `EXIT: … handed to lm63 automatic mode`. The chip follows its own remote sensor (`temp2` in `sensors`), which reads roughly 10 °C below the CPU temperature the daemon uses. The next start switches the chip back to manual mode (`INIT: Took … back from lm63 automatic mode`).
+- **Channels already under hardware control** (`pwmN_enable` ≠ 1) are left alone.
+- **Anything else**, or any failed write: a fixed PWM 180, logged as `EXIT: … left in manual mode at fallback 180pwm`.
+
+Before this, the daemon set PWM 0 on exit. On a UCG-Max that left the fan stopped in manual mode, because UniFi OS does not take the channel back and its stock lm63 table only starts the fan at 127 °C.
+
 ### Which version am I running?
 
 ```bash
@@ -292,7 +340,7 @@ Re-run the installer. There is no auto-update: this runs as root, and a self-upd
 root daemon is a large attack surface for a fan controller.
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/iceteaSA/unifi-fan-control/main/install.sh | sudo bash
+curl -fsSL https://raw.githubusercontent.com/marcel1337x/unifi-fan-control/main/install.sh | sudo bash
 ```
 
 **Your config is preserved.** `/data/fan-control/config` is never overwritten by an
@@ -326,11 +374,11 @@ with it, that was the overlay rather than this script. Reinstall with the one-li
 
 ## Star History
 
-<a href="https://www.star-history.com/?type=date&repos=iceteaSA%2Funifi-fan-control">
+<a href="https://www.star-history.com/?type=date&repos=marcel1337x%2Funifi-fan-control">
  <picture>
-   <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/chart?repos=iceteaSA/unifi-fan-control&type=date&theme=dark&legend=top-left" />
-   <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/chart?repos=iceteaSA/unifi-fan-control&type=date&legend=top-left" />
-   <img alt="Star History Chart" src="https://api.star-history.com/chart?repos=iceteaSA/unifi-fan-control&type=date&legend=top-left" />
+   <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/chart?repos=marcel1337x/unifi-fan-control&type=date&theme=dark&legend=top-left" />
+   <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/chart?repos=marcel1337x/unifi-fan-control&type=date&legend=top-left" />
+   <img alt="Star History Chart" src="https://api.star-history.com/chart?repos=marcel1337x/unifi-fan-control&type=date&legend=top-left" />
  </picture>
 </a>
 

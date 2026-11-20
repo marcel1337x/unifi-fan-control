@@ -350,6 +350,7 @@ prepare_case() {
 install_environment() {
     env \
         FAN_CONTROL_INSTALL_DIR="$INSTALL_DIR" \
+        FAN_CONTROL_DATA_ROOT="$CASE_DIR/data" \
         FAN_CONTROL_SERVICE_FILE="$SERVICE_FILE" \
         FAN_CONTROL_ALLOW_CHOWN_FAILURE=1 \
         FAN_CONTROL_SYSTEMCTL=systemctl \
@@ -375,6 +376,7 @@ install_piped_environment() {
         # shellcheck disable=SC2002
         cat install.sh | env \
             FAN_CONTROL_INSTALL_DIR="$INSTALL_DIR" \
+            FAN_CONTROL_DATA_ROOT="$CASE_DIR/data" \
             FAN_CONTROL_SERVICE_FILE="$SERVICE_FILE" \
             FAN_CONTROL_ALLOW_CHOWN_FAILURE=1 \
             FAN_CONTROL_SYSTEMCTL=systemctl \
@@ -451,6 +453,66 @@ test_local_payload_wins_without_curl() {
     assert_file_set
     assert_eq "$(cat "$INSTALL_DIR/VERSION")" "$MOCK_VERSION" "local version: "
     assert_eq "$(cat "$CURL_LOG")" "" "local payload made a network call: "
+    assert_contains "$(cat "$SERVICE_FILE")" "ExecStart=$INSTALL_DIR/fan-control.sh" "unit points at install dir: "
+}
+
+test_checkout_installs_in_place() {
+    prepare_case checkout
+    MOCK_VERSION=1.2.3
+    # No FAN_CONTROL_INSTALL_DIR: a .git under the data root alone selects the checkout.
+    # Worktree-style .git file, which a -d test would miss.
+    INSTALL_DIR="$CASE_DIR/data/work/unifi-fan-control"
+    INSTALLER_DIR="$INSTALL_DIR"
+    mkdir -p "$INSTALL_DIR"
+    printf 'gitdir: /elsewhere\n' >"$INSTALL_DIR/.git"
+    cp "$INSTALLER" "$INSTALLER_DIR/install.sh"
+    make_payload_dir "$INSTALLER_DIR" "$MOCK_VERSION"
+    printf 'MIN_TEMP=48\n' >"$INSTALL_DIR/config"
+    expected_daemon=$(cat "$INSTALL_DIR/fan-control.sh")
+
+    install_environment FAN_CONTROL_INSTALL_DIR=
+
+    assert_file_set
+    unit=$(cat "$SERVICE_FILE")
+    assert_contains "$unit" "WorkingDirectory=$INSTALL_DIR$" "unit working dir: "
+    assert_contains "$unit" "ExecStart=$INSTALL_DIR/fan-control.sh" "unit exec path: "
+    if grep -q '/data/fan-control' <<<"$unit"; then
+        fail "checkout unit still names /data/fan-control"
+    fi
+    assert_eq "$(cat "$INSTALL_DIR/fan-control.sh")" "$expected_daemon" "in-place daemon: "
+    assert_eq "$(cat "$INSTALL_DIR/config")" "MIN_TEMP=48" "in-place config preservation: "
+    assert_eq "$(cat "$CURL_LOG")" "" "in-place install made a network call: "
+    leftovers=$(find "$INSTALL_DIR" -maxdepth 1 \( -name '*.new.*' -o -name '*.rollback.*' \))
+    assert_eq "$leftovers" "" "in-place install left temp files: "
+}
+
+test_checkout_outside_data_root_installs_to_default() {
+    prepare_case checkout-outside
+    MOCK_VERSION=1.2.3
+    # e.g. /root: hidden by ProtectHome=true and wiped by firmware updates.
+    INSTALLER_DIR="$CASE_DIR/root/unifi-fan-control"
+    mkdir -p "$INSTALLER_DIR/.git"
+    cp "$INSTALLER" "$INSTALLER_DIR/install.sh"
+    make_payload_dir "$INSTALLER_DIR" "$MOCK_VERSION"
+
+    install_environment FAN_CONTROL_INSTALL_DIR=
+
+    assert_eq "$(cat "$CASE_DIR/data/fan-control/VERSION")" "$MOCK_VERSION" "fallback install dir: "
+    assert_contains "$(cat "$SERVICE_FILE")" "ExecStart=$CASE_DIR/data/fan-control/fan-control.sh" "fallback unit: "
+}
+
+test_unit_unsafe_install_dir_is_rejected() {
+    prepare_case unsafe-path
+    MOCK_VERSION=1.2.3
+    make_payload_dir "$INSTALLER_DIR" "$MOCK_VERSION"
+
+    for bad in "$CASE_DIR/my dir" "$CASE_DIR/50%" "relative/dir"; do
+        if output=$(install_environment FAN_CONTROL_INSTALL_DIR="$bad" 2>&1); then
+            fail "installer accepted unsafe install dir: $bad"
+        fi
+        assert_contains "$output" "Install directory must be an absolute path" "unsafe path message: "
+    done
+    [[ ! -e "$CASE_DIR/my dir" ]] || fail "unsafe install dir was created"
 }
 
 test_exact_version_uses_verified_release_urls() {
@@ -533,7 +595,7 @@ test_asset_host_dns_failure_explains_the_redirect() {
     assert_contains "$output" "GitHub redirects release downloads to release-assets.githubusercontent.com" "redirect diagnosis: "
     assert_contains "$output" "resolver problem, not a fault in the installer or release" "resolver diagnosis: "
     assert_contains "$output" "Unverified fallback host raw.githubusercontent.com is reachable for v1.2.3" "fallback reachability: "
-    assert_contains "$output" "curl -fsSL https://raw.githubusercontent.com/iceteaSA/unifi-fan-control/v1.2.3/install.sh | sudo FAN_CONTROL_ALLOW_UNVERIFIED=v1.2.3 bash" "consent command: "
+    assert_contains "$output" "curl -fsSL https://raw.githubusercontent.com/marcel1337x/unifi-fan-control/v1.2.3/install.sh | sudo FAN_CONTROL_ALLOW_UNVERIFIED=v1.2.3 bash" "consent command: "
 }
 
 test_http_release_failure_does_not_blame_dns() {
@@ -562,7 +624,7 @@ test_unverified_consent_installs_the_failed_release() {
     assert_eq "$(cat "$INSTALL_DIR/VERSION")" "$MOCK_VERSION" "unverified release version: "
     assert_contains "$output" "WARNING: SHA256 verification will be skipped for release v1.2.3" "pre-install warning: "
     assert_contains "$output" "WARNING: Installed v1.2.3 without SHA256 verification" "post-install warning: "
-    assert_contains "$(cat "$CURL_LOG")" "raw.githubusercontent.com/iceteaSA/unifi-fan-control/v1.2.3/fan-control.sh" "unverified release URL: "
+    assert_contains "$(cat "$CURL_LOG")" "raw.githubusercontent.com/marcel1337x/unifi-fan-control/v1.2.3/fan-control.sh" "unverified release URL: "
 }
 
 test_unverified_consent_still_validates_the_payload() {
@@ -794,6 +856,9 @@ test_restart_failure_restores_prior_payload() {
 }
 
 test_local_payload_wins_without_curl
+test_checkout_installs_in_place
+test_checkout_outside_data_root_installs_to_default
+test_unit_unsafe_install_dir_is_rejected
 test_exact_version_uses_verified_release_urls
 test_piped_installer_ignores_cwd_payload
 test_latest_resolves_a_concrete_verified_release

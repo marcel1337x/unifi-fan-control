@@ -247,7 +247,9 @@ ubnt-systool cputemp
 journalctl -u fan-control.service -n 20 | grep "TEMP:"
 ```
 
-`TEMP:` is logged when the raw or smoothed value changes. A quiet `TEMP:`
+`TEMP:` is a debug message: set `LOG_LEVEL=debug` in the config and restart
+the service to see it. It is logged when the raw or smoothed value changes by
+2 °C or more. A quiet `TEMP:`
 stream is normal at a stable temperature; `STATUS:` remains the heartbeat and
 is written every 10 control cycles.
 
@@ -401,7 +403,7 @@ cat /data/fan-control/config
 The default installer uses the latest tagged release. To retry a known release:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/iceteaSA/unifi-fan-control/main/install.sh | sudo FAN_CONTROL_VERSION=v1.2.0 bash
+curl -fsSL https://raw.githubusercontent.com/marcel1337x/unifi-fan-control/main/install.sh | sudo FAN_CONTROL_VERSION=v1.2.0 bash
 ```
 
 The installer verifies the downloaded tarball against the matching
@@ -425,7 +427,7 @@ reachable. If it is reachable and the resolver cannot be fixed immediately, use
 the exact tag from the error message to opt in to the fallback:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/iceteaSA/unifi-fan-control/v1.2.0/install.sh | sudo FAN_CONTROL_ALLOW_UNVERIFIED=v1.2.0 bash
+curl -fsSL https://raw.githubusercontent.com/marcel1337x/unifi-fan-control/v1.2.0/install.sh | sudo FAN_CONTROL_ALLOW_UNVERIFIED=v1.2.0 bash
 ```
 
 This is a deliberate one-install exception. It downloads tagged files from
@@ -440,10 +442,10 @@ release path remains the right fix.
 Branch installs are for development only and are not checksum-verified.
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/iceteaSA/unifi-fan-control/main/install.sh | sudo FAN_CONTROL_BRANCH=feature/example bash
+curl -fsSL https://raw.githubusercontent.com/marcel1337x/unifi-fan-control/main/install.sh | sudo FAN_CONTROL_BRANCH=feature/example bash
 
 # Or install local runtime files from a checkout
-git clone https://github.com/iceteaSA/unifi-fan-control.git
+git clone https://github.com/marcel1337x/unifi-fan-control.git
 cd unifi-fan-control
 sudo ./install.sh
 ```
@@ -478,10 +480,18 @@ journalctl -u fan-control.service --since "1 hour ago" | wc -l
 
 **Note**: Service has built-in rate limiting (10,000 logs/day)
 
+Before 1.3, a temperature held between `MIN_TEMP` and the activation
+temperature (`MIN_TEMP + HYSTERESIS`) logged
+`DEADBAND:  DELTA=… | THRESHOLD=…` on every cycle, about 5,760 lines a day at
+`CHECK_INTERVAL=15`. Upgrading fixes it: the deadband reference now moves when the
+recalculated speed equals the current one (see the deadband note in README.md).
+
 **Solutions**:
 ```bash
-# Increase check interval to reduce logging frequency
 sudo nano /data/fan-control/config
+# Make sure per-cycle diagnostics are off (only the debug level writes them)
+LOG_LEVEL=info     # or warn / error for even less
+# Increase check interval to reduce logging frequency
 CHECK_INTERVAL=30  # Default: 15 seconds
 
 sudo systemctl restart fan-control.service
@@ -541,7 +551,7 @@ journalctl -u fan-control.service | grep "STATUS:"
 ### Performance Analysis
 
 ```bash
-# Temperature trends (last hour)
+# Temperature trends (last hour; needs LOG_LEVEL=debug)
 journalctl -u fan-control.service --since "1 hour ago" | grep "TEMP:"
 
 # Daemon heartbeat and current temperature
@@ -580,7 +590,7 @@ If you're still experiencing issues:
    - Configuration file
    - Steps to reproduce
 
-3. **Check existing issues**: https://github.com/iceteaSA/unifi-fan-control/issues
+3. **Check existing issues**: https://github.com/marcel1337x/unifi-fan-control/issues
 
 ---
 
