@@ -22,10 +22,11 @@ wait_for_log "STATUS:" 5
 
 syslog=$(cat "$SANDBOX/syslog")
 assert_eq "$(grep "^LOG_LEVEL=" "$SANDBOX/config" | cut -d= -f2 | awk '{print $1}')" "info" "default LOG_LEVEL: "
-if grep -qE ' (TEMP|CALC|DEADBAND):' <<<"$syslog"; then
+if grep -qE '(TEMP|CALC|DEADBAND):' <<<"$syslog"; then
     fail "info level emitted debug lines"
 fi
-assert_contains "$syslog" "daemon.info SET:" "info lines carry their priority: "
+assert_contains "$syslog" "<6>SET:" "info lines carry their priority: "
+assert_contains "$syslog" "CONFIG: Install dir=.* | Config=$SANDBOX/config" "install dir logged at startup: "
 echo "  ✓ Scenario ${scenario}: info level suppresses TEMP/CALC/DEADBAND"
 
 stop_daemon
@@ -42,8 +43,8 @@ echo "FAIL" >"$SANDBOX/cputemp"
 wait_for_log "ERROR: Failed to read temperature" 5
 
 syslog=$(cat "$SANDBOX/syslog")
-assert_contains "$syslog" "daemon.err ERROR:" "errors carry err priority: "
-if grep -qE ' (CONFIG|START|STATUS|SET|ALERT):' <<<"$syslog"; then
+assert_contains "$syslog" "<3>ERROR:" "errors carry err priority: "
+if grep -qE '(CONFIG|START|STATUS|SET|ALERT):' <<<"$syslog"; then
     fail "error level emitted non-error lines"
 fi
 echo "  ✓ Scenario ${scenario}: error level emits only errors"
@@ -88,6 +89,24 @@ if ((after - before > 0)); then
 fi
 ((after > 0)) || fail "DEADBAND threshold line should be logged once when first crossed"
 echo "  ✓ Scenario ${scenario}: DEADBAND threshold logged once, not per cycle"
+
+stop_daemon
+cleanup_sandbox
+
+# ── Scenario 5: subsystem-tagged problems survive LOG_LEVEL=warn ────────────
+scenario=$((scenario + 1))
+setup_sandbox
+
+set_config LOG_LEVEL=warn MIN_TEMP=999
+start_daemon
+wait_for_log "CONFIG: Invalid MIN_TEMP value: 999" 5
+
+syslog=$(cat "$SANDBOX/syslog")
+assert_contains "$syslog" "<4>CONFIG: Invalid MIN_TEMP" "explicit warn level: "
+if grep -qE '(START|STATUS|COLDSTART):|CONFIG: fan-control v' <<<"$syslog"; then
+    fail "warn level emitted info lines"
+fi
+echo "  ✓ Scenario ${scenario}: CONFIG: problems are logged at warn"
 
 stop_daemon
 cleanup_sandbox

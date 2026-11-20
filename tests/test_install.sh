@@ -350,6 +350,7 @@ prepare_case() {
 install_environment() {
     env \
         FAN_CONTROL_INSTALL_DIR="$INSTALL_DIR" \
+        FAN_CONTROL_DATA_ROOT="$CASE_DIR/data" \
         FAN_CONTROL_SERVICE_FILE="$SERVICE_FILE" \
         FAN_CONTROL_ALLOW_CHOWN_FAILURE=1 \
         FAN_CONTROL_SYSTEMCTL=systemctl \
@@ -375,6 +376,7 @@ install_piped_environment() {
         # shellcheck disable=SC2002
         cat install.sh | env \
             FAN_CONTROL_INSTALL_DIR="$INSTALL_DIR" \
+            FAN_CONTROL_DATA_ROOT="$CASE_DIR/data" \
             FAN_CONTROL_SERVICE_FILE="$SERVICE_FILE" \
             FAN_CONTROL_ALLOW_CHOWN_FAILURE=1 \
             FAN_CONTROL_SYSTEMCTL=systemctl \
@@ -457,10 +459,12 @@ test_local_payload_wins_without_curl() {
 test_checkout_installs_in_place() {
     prepare_case checkout
     MOCK_VERSION=1.2.3
-    # No FAN_CONTROL_INSTALL_DIR: the .git directory alone must select the checkout.
-    INSTALL_DIR="$CASE_DIR/work/unifi-fan-control"
+    # No FAN_CONTROL_INSTALL_DIR: a .git under the data root alone selects the checkout.
+    # Worktree-style .git file, which a -d test would miss.
+    INSTALL_DIR="$CASE_DIR/data/work/unifi-fan-control"
     INSTALLER_DIR="$INSTALL_DIR"
-    mkdir -p "$INSTALL_DIR/.git"
+    mkdir -p "$INSTALL_DIR"
+    printf 'gitdir: /elsewhere\n' >"$INSTALL_DIR/.git"
     cp "$INSTALLER" "$INSTALLER_DIR/install.sh"
     make_payload_dir "$INSTALLER_DIR" "$MOCK_VERSION"
     printf 'MIN_TEMP=48\n' >"$INSTALL_DIR/config"
@@ -480,6 +484,35 @@ test_checkout_installs_in_place() {
     assert_eq "$(cat "$CURL_LOG")" "" "in-place install made a network call: "
     leftovers=$(find "$INSTALL_DIR" -maxdepth 1 \( -name '*.new.*' -o -name '*.rollback.*' \))
     assert_eq "$leftovers" "" "in-place install left temp files: "
+}
+
+test_checkout_outside_data_root_installs_to_default() {
+    prepare_case checkout-outside
+    MOCK_VERSION=1.2.3
+    # e.g. /root: hidden by ProtectHome=true and wiped by firmware updates.
+    INSTALLER_DIR="$CASE_DIR/root/unifi-fan-control"
+    mkdir -p "$INSTALLER_DIR/.git"
+    cp "$INSTALLER" "$INSTALLER_DIR/install.sh"
+    make_payload_dir "$INSTALLER_DIR" "$MOCK_VERSION"
+
+    install_environment FAN_CONTROL_INSTALL_DIR=
+
+    assert_eq "$(cat "$CASE_DIR/data/fan-control/VERSION")" "$MOCK_VERSION" "fallback install dir: "
+    assert_contains "$(cat "$SERVICE_FILE")" "ExecStart=$CASE_DIR/data/fan-control/fan-control.sh" "fallback unit: "
+}
+
+test_unit_unsafe_install_dir_is_rejected() {
+    prepare_case unsafe-path
+    MOCK_VERSION=1.2.3
+    make_payload_dir "$INSTALLER_DIR" "$MOCK_VERSION"
+
+    for bad in "$CASE_DIR/my dir" "$CASE_DIR/50%" "relative/dir"; do
+        if output=$(install_environment FAN_CONTROL_INSTALL_DIR="$bad" 2>&1); then
+            fail "installer accepted unsafe install dir: $bad"
+        fi
+        assert_contains "$output" "Install directory must be an absolute path" "unsafe path message: "
+    done
+    [[ ! -e "$CASE_DIR/my dir" ]] || fail "unsafe install dir was created"
 }
 
 test_exact_version_uses_verified_release_urls() {
@@ -824,6 +857,8 @@ test_restart_failure_restores_prior_payload() {
 
 test_local_payload_wins_without_curl
 test_checkout_installs_in_place
+test_checkout_outside_data_root_installs_to_default
+test_unit_unsafe_install_dir_is_rejected
 test_exact_version_uses_verified_release_urls
 test_piped_installer_ignores_cwd_payload
 test_latest_resolves_a_concrete_verified_release

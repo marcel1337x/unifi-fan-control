@@ -9,7 +9,8 @@ readonly MAX_EXPANDED_ARCHIVE_BYTES=$((4 * 1024 * 1024))
 readonly MAX_PAYLOAD_FILE_BYTES=$((512 * 1024))
 REPO_OWNER="marcel1337x"
 REPO_NAME="unifi-fan-control"
-INSTALL_DIR="${FAN_CONTROL_INSTALL_DIR:-/data/fan-control}"
+DATA_ROOT="${FAN_CONTROL_DATA_ROOT:-/data}" # UniFi OS data directory
+INSTALL_DIR="${FAN_CONTROL_INSTALL_DIR:-$DATA_ROOT/fan-control}"
 SERVICE_FILE="${FAN_CONTROL_SERVICE_FILE:-/etc/systemd/system/fan-control.service}"
 SYSTEMCTL="${FAN_CONTROL_SYSTEMCTL:-systemctl}"
 RELEASE_BASE_URL="${FAN_CONTROL_RELEASE_BASE_URL:-https://github.com/$REPO_OWNER/$REPO_NAME/releases}"
@@ -35,9 +36,11 @@ if [[ -f "$SCRIPT_PATH" ]]; then
     SCRIPT_DIR="$(cd "$(dirname "$SCRIPT_PATH")" && pwd)"
 fi
 
-# Run from a git checkout, the checkout itself is the install: the daemon keeps its
-# state beside itself and the unit is pointed at it instead of /data/fan-control.
-if [[ -z "${FAN_CONTROL_INSTALL_DIR:-}" && -n "$SCRIPT_DIR" && -d "$SCRIPT_DIR/.git" ]]; then
+# Run from a git checkout under /data, the checkout itself is the install: the daemon
+# keeps its state beside itself and the unit is pointed at it. Anywhere else falls back
+# to /data/fan-control: e.g. /root and /home are hidden from the service by the unit's
+# ProtectHome=true, so an in-place install there could never start. -e, not -d: .git is a file in worktrees and submodules.
+if [[ -z "${FAN_CONTROL_INSTALL_DIR:-}" && "$SCRIPT_DIR" == "$DATA_ROOT"/* && -e "$SCRIPT_DIR/.git" ]]; then
     INSTALL_DIR="$SCRIPT_DIR"
 fi
 
@@ -576,6 +579,12 @@ install_validated_payload() {
 
     cleanup_destination_temps
 }
+
+# The path is written into the unit's WorkingDirectory/ExecStart, where whitespace
+# splits arguments and %, \, quotes are systemd syntax.
+if [[ "$INSTALL_DIR" != /* || "$INSTALL_DIR" =~ [[:space:]%\\\"\'] ]]; then
+    fail "Install directory must be an absolute path without spaces, %, \\ or quotes: $INSTALL_DIR"
+fi
 
 if [[ "$(id -u)" -ne 0 ]]; then
     fail "This script must be run as root (sudo)"

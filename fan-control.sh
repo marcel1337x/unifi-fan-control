@@ -4,6 +4,8 @@
 ###############################################################################
 
 umask 077
+# A closed log stream (e.g. journald restarting) must cost log lines, not the daemon.
+trap '' PIPE
 
 ###[ CONFIGURATION ]###########################################################
 # State lives beside the script: /data/fan-control normally, the checkout itself
@@ -36,24 +38,43 @@ DEFAULT_DRIVE_MAX_TEMP=70
 DEFAULT_DRIVE_CHECK_INTERVAL=60
 DEFAULT_LOG_LEVEL=info # error, warn, info or debug
 
-# Log levels, indexed by number; the level is derived from the message's PREFIX tag.
+# Log levels, indexed by number.
 LOG_LEVEL_NAMES=(error warn info debug)
-LOG_PRIORITIES=(err warning info debug)
+# Journal severities: err, warning, info, info. debug is sent as info on purpose:
+# UniFi OS ships journald with MaxLevelStore=info, which silently discards severity 7,
+# so LOG_LEVEL=debug would otherwise show nothing. LOG_LEVEL alone decides emission.
+LOG_PRIORITIES=(3 4 6 6)
 LOG_LEVEL_NUM=2 # info until the config has been read
 
+# log [error|warn|info|debug] "PREFIX: message"
+# Without an explicit level it is derived from the PREFIX tag. Pass one when a
+# message keeps its subsystem tag (DRIVE:, DETECT:, ...) but reports a problem.
 # Filter in-process rather than at read time: the unit's journal rate limit counts
 # every message regardless of priority, so a suppressed debug line must never be sent.
+# Lines go to stdout with a "<severity>" prefix, which journald parses
+# (SyslogLevelPrefix) and files under the unit's SyslogIdentifier. Forking logger(1)
+# per line lost ~30% of lines from `journalctl -u`: journald attributes a message by
+# looking up the sender's cgroup, and the short-lived logger had often exited by then.
 log() {
-    local msg=$1
-    local level
-    case ${msg%%:*} in
-        FATAL | ERROR) level=0 ;; # emitted at every LOG_LEVEL
-        ALERT | WARNING) level=1 ;;
-        TEMP | CALC | DEADBAND) level=3 ;;
-        *) level=2 ;;
+    local msg=${!#}
+    local level=${2:+$1}
+    if [[ -z "$level" ]]; then
+        case ${msg%%:*} in
+            FATAL | ERROR) level=error ;;
+            ALERT | WARNING) level=warn ;;
+            TEMP | CALC | DEADBAND) level=debug ;;
+            *) level=info ;;
+        esac
+    fi
+    local num
+    case $level in
+        error) num=0 ;; # emitted at every LOG_LEVEL
+        warn) num=1 ;;
+        info) num=2 ;;
+        *) num=3 ;;
     esac
-    ((level <= LOG_LEVEL_NUM)) || return 0
-    logger -t fan-control -p "daemon.${LOG_PRIORITIES[level]}" "$msg"
+    ((num <= LOG_LEVEL_NUM)) || return 0
+    printf '<%d>%s\n' "${LOG_PRIORITIES[num]}" "$msg"
 }
 
 # Create config file if it doesn't exist
@@ -243,11 +264,11 @@ CONFIG
         if mv "$temp_config" "$CONFIG_FILE" 2>/dev/null; then
             log "MIGRATE: Config file updated successfully"
         else
-            log "MIGRATE: Failed to update config file"
+            log error "MIGRATE: Failed to update config file"
             rm -f "$temp_config" 2>/dev/null
         fi
     else
-        log "MIGRATE: Failed to write temporary config file"
+        log error "MIGRATE: Failed to write temporary config file"
         rm -f "$temp_config" 2>/dev/null
     fi
 }
@@ -263,7 +284,7 @@ validate_config() {
     local default=$5
 
     if ! [[ "$value" =~ ^[0-9]+$ ]] || ((value < min || value > max)); then
-        log "CONFIG: Invalid $param value: $value (should be between $min and $max), using default: $default"
+        log warn "CONFIG: Invalid $param value: $value (should be between $min and $max), using default: $default"
         eval "${param}=${default}"
         return 1
     fi
@@ -288,18 +309,18 @@ validate_config "DRIVE_MIN_TEMP" "$DRIVE_MIN_TEMP" 30 90 "$DEFAULT_DRIVE_MIN_TEM
 validate_config "DRIVE_MAX_TEMP" "$DRIVE_MAX_TEMP" 40 95 "$DEFAULT_DRIVE_MAX_TEMP" || config_changed=true
 validate_config "DRIVE_CHECK_INTERVAL" "$DRIVE_CHECK_INTERVAL" 15 600 "$DEFAULT_DRIVE_CHECK_INTERVAL" || config_changed=true
 if [[ "$DRIVE_TEMP_ENABLED" != "auto" && "$DRIVE_TEMP_ENABLED" != "true" && "$DRIVE_TEMP_ENABLED" != "false" ]]; then
-    log "CONFIG: Invalid DRIVE_TEMP_ENABLED value: $DRIVE_TEMP_ENABLED, using default: $DEFAULT_DRIVE_TEMP_ENABLED"
+    log warn "CONFIG: Invalid DRIVE_TEMP_ENABLED value: $DRIVE_TEMP_ENABLED, using default: $DEFAULT_DRIVE_TEMP_ENABLED"
     DRIVE_TEMP_ENABLED=$DEFAULT_DRIVE_TEMP_ENABLED
     config_changed=true
 fi
 if ((DRIVE_MAX_TEMP <= DRIVE_MIN_TEMP)); then
-    log "CONFIG: DRIVE_MAX_TEMP must exceed DRIVE_MIN_TEMP, using defaults"
+    log warn "CONFIG: DRIVE_MAX_TEMP must exceed DRIVE_MIN_TEMP, using defaults"
     DRIVE_MIN_TEMP=$DEFAULT_DRIVE_MIN_TEMP
     DRIVE_MAX_TEMP=$DEFAULT_DRIVE_MAX_TEMP
     config_changed=true
 fi
 if [[ "$LOG_LEVEL" != "${LOG_LEVEL_NAMES[LOG_LEVEL_NUM]}" ]]; then
-    log "CONFIG: Invalid LOG_LEVEL value: $LOG_LEVEL, using default: $DEFAULT_LOG_LEVEL"
+    log warn "CONFIG: Invalid LOG_LEVEL value: $LOG_LEVEL, using default: $DEFAULT_LOG_LEVEL"
     LOG_LEVEL=$DEFAULT_LOG_LEVEL
     config_changed=true
 fi
@@ -419,7 +440,7 @@ detect_pwm_devices() {
         local current_val
         if ! current_val=$(cat "$pwm_file" 2>/dev/null); then
             if [[ "${PWM_DEVICE_STATUS[$pwm_file]:-}" != "excluded" ]]; then
-                log "DETECT: ${pwm_file} unavailable, excluding"
+                log warn "DETECT: ${pwm_file} unavailable, excluding"
                 devices_changed=true
             fi
             PWM_DEVICE_STATUS["$pwm_file"]="excluded"
@@ -427,7 +448,7 @@ detect_pwm_devices() {
         fi
         if ! echo "$current_val" >"$pwm_file" 2>/dev/null; then
             if [[ "${PWM_DEVICE_STATUS[$pwm_file]:-}" != "excluded" ]]; then
-                log "DETECT: ${pwm_file} unavailable, excluding"
+                log warn "DETECT: ${pwm_file} unavailable, excluding"
                 devices_changed=true
             fi
             PWM_DEVICE_STATUS["$pwm_file"]="excluded"
@@ -458,7 +479,7 @@ detect_pwm_devices() {
         # waiting for the six-second settling time.
         for pwm_file in "${writable[@]}"; do
             if ! echo "$MAX_PWM" >"$pwm_file" 2>/dev/null; then
-                log "DETECT: ${pwm_file} unavailable, excluding"
+                log warn "DETECT: ${pwm_file} unavailable, excluding"
                 PWM_DEVICE_STATUS["$pwm_file"]="excluded"
             fi
         done
@@ -526,6 +547,23 @@ detect_pwm_devices() {
     PWM_DETECTION_INITIALIZED=true
 }
 
+FALLBACK_PWM=180 # exit speed for a channel that can't be handed to hardware control
+
+# Take back lm63 channels left in automatic mode, normally by a previous run's EXIT
+# trap (hand_off_pwm): in automatic mode the chip rejects manual PWM writes, so
+# detection would exclude them as unwritable. No state file: an uninstall/reinstall
+# would lose it, and the stock lm63 table (127 °C on every point) is no curve to keep.
+for _enable in "$HWMON_BASE"/hwmon*/pwm[1-9]_enable "$HWMON_BASE"/hwmon*/device/pwm[1-9]_enable; do
+    [[ -f "$_enable" && "$(cat "$(dirname "$_enable")/name" 2>/dev/null)" == lm63 ]] || continue
+    [[ "$(cat "$_enable" 2>/dev/null)" == 2 ]] || continue
+    if echo 1 >"$_enable" 2>/dev/null; then
+        log "INIT: Took ${_enable%_enable} back from lm63 automatic mode"
+    else
+        log warn "INIT: Failed to take ${_enable%_enable} back from lm63 automatic mode"
+    fi
+done
+unset _enable
+
 # Determine PWM devices to control
 FAN_PWM_DEVICES=()
 KNOWN_PWM_DEVICES=()
@@ -559,9 +597,52 @@ mkdir -p "$(dirname "$TEMP_STATE_FILE")" "$(dirname "$OPTIMAL_PWM_FILE")" || {
 # flock is the authoritative guard; stale PID ps-checks can false-positive on PID reuse.
 PID_FILE="${FAN_CONTROL_PID_FILE:-/var/run/fan-control.pid}"
 
+# Spread the config curve (MIN_TEMP→MAX_TEMP, MIN_PWM→MAX_PWM) over the chip's
+# lookup-table points. The lm63 only accepts LUT writes in manual mode, and its table
+# follows its remote diode (sensors' temp2), not ubnt-systool's CPU reading. UniFi OS
+# ships the table as 127 °C/255 on every point, i.e. no cooling below 127 °C.
+program_lm63_curve() {
+    local pwm=$1
+    local n=0
+    local k
+    while [[ -e "${pwm}_auto_point$((n + 1))_temp" ]]; do
+        n=$((n + 1))
+    done
+    ((n >= 2)) || return 1
+    for ((k = 0; k < n; k++)); do
+        echo $(((MIN_TEMP + k * (MAX_TEMP - MIN_TEMP) / (n - 1)) * 1000)) \
+            >"${pwm}_auto_point$((k + 1))_temp" 2>/dev/null || return 1
+        echo $((MIN_PWM + k * (MAX_PWM - MIN_PWM) / (n - 1))) \
+            >"${pwm}_auto_point$((k + 1))_pwm" 2>/dev/null || return 1
+    done
+}
+
+# Leave a channel under control when the daemon exits. PWM 0 in manual mode (the old
+# behaviour) left the UCG-Max's fan stopped with nothing driving it: UniFi OS does not
+# take the channel back, and the kernel never throttles. Channels not in manual mode
+# are already hardware-controlled and left alone; an lm63 gets the config curve and
+# automatic mode; anything else, or any failed write, gets FALLBACK_PWM.
+hand_off_pwm() {
+    local pwm=$1
+    local enable_file="${pwm}_enable"
+    local mode
+    mode=$(cat "$enable_file" 2>/dev/null) || mode=""
+    if [[ -n "$mode" && "$mode" != 1 ]]; then
+        return 0
+    fi
+    if [[ "$mode" == 1 && "$(cat "$(dirname "$pwm")/name" 2>/dev/null)" == lm63 ]] &&
+        program_lm63_curve "$pwm" && echo 2 >"$enable_file" 2>/dev/null &&
+        [[ "$(cat "$enable_file" 2>/dev/null)" == 2 ]]; then
+        log "EXIT: ${pwm} handed to lm63 automatic mode (${MIN_TEMP}-${MAX_TEMP}°C → ${MIN_PWM}-${MAX_PWM}pwm)"
+        return 0
+    fi
+    echo "$FALLBACK_PWM" >"$pwm" 2>/dev/null
+    log warn "EXIT: ${pwm} left in manual mode at fallback ${FALLBACK_PWM}pwm"
+}
+
 cleanup() {
     for _d in "${FAN_PWM_DEVICES[@]}"; do
-        echo 0 >"$_d" 2>/dev/null
+        hand_off_pwm "$_d"
     done
     rm -f "$PID_FILE" 2>/dev/null
 }
@@ -569,7 +650,7 @@ cleanup() {
 # Open the lock FD WITHOUT truncating (>>) so a running instance's PID isn't clobbered
 exec 200>>"$PID_FILE"
 if ! flock -n 200; then
-    log "ALERT: Another instance already holds the lock (PID $(cat "$PID_FILE" 2>/dev/null))"
+    log error "ALERT: Another instance already holds the lock (PID $(cat "$PID_FILE" 2>/dev/null))"
     exit 1
 fi
 echo $$ >"$PID_FILE"
@@ -689,7 +770,11 @@ get_smoothed_temp() {
     # Check if we got valid output
     if [[ -z "$raw_temp_output" ]] || ! [[ "$raw_temp_output" =~ ^[0-9]+(\.[0-9]+)?$ ]]; then
         TEMP_READ_FAILURES=$((TEMP_READ_FAILURES + 1))
-        log "ERROR: Failed to read temperature (attempt $TEMP_READ_FAILURES)"
+        # Errors can't be filtered by LOG_LEVEL, so a dead sensor must not log every
+        # cycle: the attempts up to the fail-safe, then one line per 100 failures.
+        if ((TEMP_READ_FAILURES <= 3 || TEMP_READ_FAILURES % 100 == 0)); then
+            log "ERROR: Failed to read temperature (attempt $TEMP_READ_FAILURES)"
+        fi
         # Use last known temperature — fail-safe decision is in update_fan_state
         raw_temp=$SMOOTHED_TEMP
     else
@@ -912,7 +997,7 @@ detect_drive_temperature() {
                 DRIVE_TEMP=$DRIVE_READ_TEMP
             fi
         else
-            log "DRIVE: ${device} read failed; excluding it from floor"
+            log warn "DRIVE: ${device} read failed; excluding it from floor"
             DRIVE_READ_FAILURE_LOGGED[index]=true
         fi
     done
@@ -971,7 +1056,7 @@ update_drive_temperature() {
             fi
         else
             if [[ "${DRIVE_READ_FAILURE_LOGGED[$index]}" = false ]]; then
-                log "DRIVE: ${DRIVE_DEVICES[$index]} read failed; excluding it from floor"
+                log warn "DRIVE: ${DRIVE_DEVICES[$index]} read failed; excluding it from floor"
                 DRIVE_READ_FAILURE_LOGGED[index]=true
             fi
         fi
@@ -991,7 +1076,7 @@ update_drive_temperature() {
         DRIVE_PWM_FLOOR=0
         DRIVE_FLOOR_DEVICE=""
         if [[ "$DRIVE_ALL_READ_FAILURE_LOGGED" = false ]]; then
-            log "DRIVE: All cached drives unreadable; floor disabled"
+            log warn "DRIVE: All cached drives unreadable; floor disabled"
             DRIVE_ALL_READ_FAILURE_LOGGED=true
         fi
     fi
@@ -1227,8 +1312,6 @@ update_fan_state() {
                 else
                     local temp_delta=$((avg_temp - LAST_AVG_TEMP))
                     if ((${temp_delta#-} > DEADBAND)); then
-                        # LAST_AVG_TEMP only moves when PWM changes, so a temp held between
-                        # MIN_TEMP and activation (speed pinned at MIN_PWM) repeats this every cycle.
                         if has_meaningful_temp_change "$avg_temp" "$LAST_LOGGED_DEADBAND_TEMP"; then
                             log "DEADBAND:  DELTA=${temp_delta}°C | THRESHOLD=${DEADBAND}°C"
                             LAST_LOGGED_DEADBAND_TEMP=$avg_temp
@@ -1236,14 +1319,26 @@ update_fan_state() {
                         local speed
                         speed=$(calculate_speed "$avg_temp")
                         log_calculation "$avg_temp" "$speed"
+                        local pwm_before=$LAST_PWM
                         set_fan_speed "$speed"
+                        # set_fan_speed rebases LAST_AVG_TEMP only when PWM changes. When the
+                        # target equals the current speed (e.g. pinned at MIN_PWM between MIN_TEMP
+                        # and activation), rebase here, or the same delta re-trips every cycle.
+                        if ((LAST_PWM == pwm_before)); then
+                            LAST_AVG_TEMP=$avg_temp
+                        fi
                     else
                         # Force adjustment if we're below target PWM
                         local target_speed
                         target_speed=$(calculate_speed "$avg_temp")
                         log_calculation "$avg_temp" "$target_speed"
                         if ((LAST_PWM < target_speed)); then
-                            log "DEADBAND:  Forcing adjustment (current ${LAST_PWM}pwm < target ${target_speed}pwm)"
+                            # Debug level and change-gated: while a ramp-limited climb is in
+                            # progress this fires every cycle; SET: records each actual change.
+                            if has_meaningful_temp_change "$avg_temp" "$LAST_LOGGED_DEADBAND_TEMP"; then
+                                log "DEADBAND:  Forcing adjustment (current ${LAST_PWM}pwm < target ${target_speed}pwm)"
+                                LAST_LOGGED_DEADBAND_TEMP=$avg_temp
+                            fi
                             set_fan_speed "$target_speed"
                         else
                             local deadband_log="DEADBAND:  No change | DELTA=${temp_delta}°C"
@@ -1285,6 +1380,7 @@ if ! [[ "$FAN_CONTROL_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]];
     FAN_CONTROL_VERSION="unknown"
 fi
 log "CONFIG: fan-control v${FAN_CONTROL_VERSION} starting"
+log "CONFIG: Install dir=${INSTALL_DIR} | Config=${CONFIG_FILE}"
 log "START: Optimal=${OPTIMAL_PWM}pwm | Config: MIN=${MIN_TEMP}°C, MAX=${MAX_TEMP}°C, HYST=${HYSTERESIS}°C"
 
 detect_drive_temperature

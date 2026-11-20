@@ -41,12 +41,12 @@ Tests are black-box: `tests/lib/harness.sh` runs the real daemon as a background
 
 - `setup_sandbox` exports the `FAN_CONTROL_*` path seams into `$SANDBOX` and builds a fake `hwmon/hwmon0/{pwm1,fan1_input,name}`. It prepends stub binaries to `PATH`:
   - `ubnt-systool` prints `$SANDBOX/cputemp`. Write `FAIL` to it, or delete it, to simulate a sensor failure.
-  - `logger` appends to `$SANDBOX/syslog`.
+  - The daemon logs `<severity>PREFIX: …` to stdout; `start_daemon` redirects it into `$SANDBOX/syslog` (a `logger` stub remains but the daemon no longer calls it).
   - `sleep` always sleeps 0.05 s, so loop iterations are fast.
   - `nvme`/`smartctl` serve fixtures from `$SANDBOX/{nvme,smartctl}_response[_<dev>]` and fail on `*_fail[_<dev>]` / `smartctl_standby_<dev>`.
 - Drive tests put fake device nodes under `$SANDBOX/drives`.
 - Test pattern: `setup_sandbox; trap teardown_sandbox EXIT; start_daemon`, then `wait_for_log`, `wait_for_file_value`/`wait_for_file_gt` on `hwmon0/pwm1`, and `assert_*`. Multi-scenario files call `cleanup_sandbox` between scenarios.
-- **Log text is test API.** Tests grep the syslog for exact `PREFIX:` messages, so rewording a log line can break tests (and users' greps, see AGENTS.md).
+- **Log text is test API.** Tests grep `$SANDBOX/syslog` for exact `PREFIX:` messages, so rewording a log line can break tests (and users' greps, see AGENTS.md).
 - Inside tests, use `/bin/sleep` for real waits, because plain `sleep` hits the stub.
 
 ## Adding a config parameter

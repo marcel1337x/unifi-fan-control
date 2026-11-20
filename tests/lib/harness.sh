@@ -156,7 +156,8 @@ teardown_sandbox() {
 # ── Daemon lifecycle ─────────────────────────────────────────────────────────
 start_daemon() {
     # shellcheck disable=SC2086
-    bash "$FAN_CONTROL_SCRIPT" &
+    # The daemon logs to stdout; under systemd that stream is the journal.
+    bash "$FAN_CONTROL_SCRIPT" >>"$SANDBOX/syslog" &
     DAEMON_PID=$!
     # Give the daemon a moment to bootstrap and enter the main loop
     /bin/sleep 0.5

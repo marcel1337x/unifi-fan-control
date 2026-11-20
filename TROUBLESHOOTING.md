@@ -483,7 +483,8 @@ journalctl -u fan-control.service --since "1 hour ago" | wc -l
 Before 1.3, a temperature held between `MIN_TEMP` and the activation
 temperature (`MIN_TEMP + HYSTERESIS`) logged
 `DEADBAND:  DELTA=… | THRESHOLD=…` on every cycle, about 5,760 lines a day at
-`CHECK_INTERVAL=15`. Upgrading fixes it.
+`CHECK_INTERVAL=15`. Upgrading fixes it: the deadband reference now moves when the
+recalculated speed equals the current one (see the deadband note in README.md).
 
 **Solutions**:
 ```bash
